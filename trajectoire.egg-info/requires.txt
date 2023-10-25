@@ -1,0 +1,16 @@
+matplotlib
+numpy
+pandas
+pyam-iamc
+
+[doc]
+IPython
+nbsphinx
+numpydoc
+Sphinx
+sphinx-autodoc-typehints
+sphinxcontrib-napoleon
+sphinx_rtd_theme
+
+[test]
+pytest-cov
