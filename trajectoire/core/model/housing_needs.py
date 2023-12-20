@@ -122,8 +122,11 @@ def calculate_construction_needs_from_population_growth(housing_needs_combined_i
         construction_needs = construction_needs.clip(lower=0)
 
         # create a new dataframe with year as a column
-        result_df = pd.DataFrame({'year': housing_needs_combined_iamdf['year'] -1,
+        result_df = pd.DataFrame({'year': housing_needs_combined_iamdf['year']-1,
                                   'value': construction_needs})
+
+        # drop the first year of result_df e.g. 2019
+        result_df = result_df.drop(result_df.index[0])
 
         # Get the model and scenario names from housing_needs
         model_name = housing_needs_filtered['model'].iloc[0]
@@ -146,6 +149,7 @@ def calculate_construction_needs_from_population_growth(housing_needs_combined_i
 
 
 def run_construction_pyam(combined_construction_needs_from_population_growth_iamdf,
+                          demolition,
                    dem_scenario=None, construction_needs_scenario=None,
                    pct_ind_col_surface_scenario=None, new_scenario=None,
                      created_scenario_construction_name=None):
@@ -160,16 +164,17 @@ def run_construction_pyam(combined_construction_needs_from_population_growth_iam
 
     # Iterate over years
     for year in range(2020, 2051):
-        # Calculate demolition surface
-        demolition_surface_ind = dem.filter(year=year, scenario=dem_scenario, variable='Individual_dwelling', unit='Surface in m2').data['value'].values[0]
-        demolition_surface_col = dem.filter(year=year, scenario=dem_scenario, variable='Collective_dwelling', unit='Surface in m2').data['value'].values[0]
-        demolition_surface = demolition_surface_ind + demolition_surface_col
+        # Take demolition and construction needs surface
+        demolition_surface = demolition.filter(year=year, scenario=dem_scenario, variable='Residential_dwelling', unit='Surface in m2').data['value'].values[0]
+        construction_needs_surface = combined_construction_needs_from_population_growth_iamdf.filter(year=year, variable='Construction needs from population growth', scenario=construction_needs_scenario).data['value'].values[0]
 
         # Calculate construction needs
-        construction_needs = demolition_surface + combined_construction_needs_from_population_growth_iamdf.filter(year=year, scenario=construction_needs_scenario).data['value'].values[0]
+        # construction_needs = demolition_surface + construction_needs_surface
 
-        # Calculate effective construction needs, taking into account the vacant surface that becomes available to meet construction needs == No more true
-        effective_construction = construction_needs
+        # Calculate construction needs with vacant surface becoming available
+        # effective_construction = construction_needs - (stock * vacant_surface.filter(year=year, scenario=vacant_surface_scenario, variable='perc').data['value'].values[0]
+
+        effective_construction = demolition_surface + construction_needs_surface
 
         # Calculate individual and collective construction surface based on the effective construction
         effective_construction_ind = effective_construction * pct_ind_col_surface.filter(year=year, scenario=pct_ind_col_surface_scenario, variable='Individual_dwelling').data['value'].values[0]
@@ -195,8 +200,6 @@ def run_construction_pyam(combined_construction_needs_from_population_growth_iam
         new_dwelling_ind_df = pd.DataFrame({'year': [year],
                                   'value': new_dwelling_ind})
 
-        recap_df = pd.DataFrame({'year': [year],
-                                  'value': construction_needs})
 
 
         # Create new IamDataFrame object from the housing needs timeseries
@@ -255,6 +258,73 @@ def run_construction_pyam(combined_construction_needs_from_population_growth_iam
                                                   new_dwelling_col_list +
                                                   new_dwelling_ind_list
                                                   )
+
+    return combined_construction_iamdf
+
+
+def run_construction_pyam_2(combined_construction_needs_from_population_growth_iamdf, dem_scenario=None,
+                          construction_needs_scenario=None, pct_ind_col_surface_scenario=None, new_scenario=None,
+                          created_scenario_construction_name=None):
+    # Prepare data containers
+    data = {'effective_construction': [], 'effective_construction_col': [], 'effective_construction_ind': [],
+            'new_dwelling': [], 'new_dwelling_col': [], 'new_dwelling_ind': []}
+
+    # Pre-filter data outside the loop for efficiency
+    dem_pre_filtered = dem.filter(scenario=dem_scenario, variable='Residential_dwelling', unit='Surface in m2')
+    construction_needs_pre_filtered = combined_construction_needs_from_population_growth_iamdf.filter(
+        scenario=construction_needs_scenario)
+    pct_ind_col_surface_pre_filtered = pct_ind_col_surface.filter(scenario=pct_ind_col_surface_scenario)
+
+    # Iterate over years
+    for year in range(2020, 2051):
+        # Take demolition and construction needs surface
+        demolition_surface = dem_pre_filtered.filter(year=year).data['value'].values[0]
+        construction_needs_surface = construction_needs_pre_filtered.filter(year=year).data['value'].values[0]
+
+        # Calculate construction needs
+        effective_construction = demolition_surface + construction_needs_surface
+
+        # Calculate individual and collective construction surface
+        effective_construction_ind = effective_construction * pct_ind_col_surface_pre_filtered.filter(year=year,
+                                                                                                      variable='Individual_dwelling').data[
+            'value'].values[0]
+        effective_construction_col = effective_construction * pct_ind_col_surface_pre_filtered.filter(year=year,
+                                                                                                      variable='Collective_dwelling').data[
+            'value'].values[0]
+
+        # Force the number of constructed dwellings for specific years if needed
+        if year in [2020, 2021, 2022]:
+            # Set your forced values here
+            # e.g., new_dwelling_ind = 1000, new_dwelling_col = 500
+            pass
+
+        # Convert to number of dwellings
+        else:
+            new_dwelling_ind = effective_construction_ind / \
+                               new.filter(year=year, scenario=new_scenario, variable='Individual_dwelling').data[
+                                   'value'].values[0]
+            new_dwelling_col = effective_construction_col / \
+                               new.filter(year=year, scenario=new_scenario, variable='Collective_dwelling').data[
+                                   'value'].values[0]
+
+        new_dwelling = new_dwelling_ind + new_dwelling_col
+
+        # Append data for each year
+        for key, value in zip(data.keys(),
+                              [effective_construction, effective_construction_col, effective_construction_ind,
+                               new_dwelling, new_dwelling_col, new_dwelling_ind]):
+            data[key].append({'year': year, 'value': value})
+
+    # Create IamDataFrame objects for each variable
+    iamdf_objects = {}
+    for key in data.keys():
+        df = pd.DataFrame(data[key])
+        iamdf_objects[key] = pyam.IamDataFrame(df, model='CSTB', scenario=created_scenario_construction_name,
+                                               region='France', variable=key.replace('_', ' ').title(),
+                                               unit='Unit here')
+
+    # Concatenate all IamDataframes into a single IamDataFrame
+    combined_construction_iamdf = pyam.concat(list(iamdf_objects.values()))
 
     return combined_construction_iamdf
 
@@ -401,6 +471,229 @@ def calculate_cumulated_operational_ghge_new_construction(construction, operatio
     combined_construction_operational_iamdf = pyam.IamDataFrame(combined_construction_operational_df)
 
     return combined_construction_operational_iamdf
+
+
+def calculate_nrj_new_construction(iamdf):
+    # Filter out the rows with the unit 'Surface in m2'
+    surface_df = iamdf.filter(unit='Surface in m2')
+    surface_df = surface_df.timeseries().reset_index()
+
+    # Get the list of years from the columns
+    years = surface_df.columns[5:]
+
+    # Initialize a list to store the results
+    results = []
+
+    # Initialize a dictionary to store the sum of collective and individual for each scenario and each year
+    residential_sums = {}
+
+    # Loop over each row in the dataframe
+    for index, row in surface_df.iterrows():
+        scenario = row['scenario']
+        # Initialize residential sums for the scenario if not already present
+        if scenario not in residential_sums:
+            residential_sums[scenario] = {year: {'elec': 0, 'bois': 0, 'rcu': 0, 'value': 0} for year in years}
+
+        # Perform calculations based on the type of dwelling
+        for year in years:
+            ef_nrj_entries = []  # To keep track of the ef_nrj entries for the current row
+            if 'Collective' in row['variable']:
+                # Calculate energy consumption in kwh ep
+                ep = row[year] * 70  # 70kwhep/m2 for collective dwelling
+                # Calculate the energy consumption in kwh ef for each vector
+                elec = ep * 0.9 / 2.3
+                rcu = ep * 0.1
+                # Append energy vector entries
+                ef_nrj_entries.append({'vector': 'elec', 'value': elec})
+                ef_nrj_entries.append({'vector': 'rcu', 'value': rcu})
+                # Add to the residential sum
+                residential_sums[scenario][year]['elec'] += elec
+                residential_sums[scenario][year]['rcu'] += rcu
+                residential_sums[scenario][year]['value'] += elec + rcu
+
+            elif 'Individual' in row['variable']:
+                # Calculate energy consumption in kwh ep
+                ep = row[year] * 55  # 55kwhep/m2 for individual dwelling
+                # Calculate the energy consumption in kwh ef for each vector
+                elec = ep * 0.8 / 2.3
+                bois = ep * 0.2
+                # Append energy vector entries
+                ef_nrj_entries.append({'vector': 'elec', 'value': elec})
+                ef_nrj_entries.append({'vector': 'bois', 'value': bois})
+                # Add to the residential sum
+                residential_sums[scenario][year]['elec'] += elec
+                residential_sums[scenario][year]['bois'] += bois
+                residential_sums[scenario][year]['value'] += elec + bois
+
+            # Append the results to the results list for each energy vector
+            for ef_nrj_entry in ef_nrj_entries:
+                results.append({
+                    'year': year,
+                    'model': 'CSTB',
+                    'scenario': scenario,
+                    'region': 'France',
+                    'variable': row['variable'],
+                    'unit': 'kWh_ef',
+                    'dpe': 'new',
+                    'ef_nrj': ef_nrj_entry['vector'],
+                    'value': ef_nrj_entry['value']
+                })
+
+    # Add residential sums to the results for each scenario
+    for scenario, yearly_sums in residential_sums.items():
+        for year, sums in yearly_sums.items():
+            for vector, vector_value in sums.items():
+                if vector == 'value':
+                    continue  # Skip the total value entry
+                results.append({
+                    'year': year,
+                    'model': 'CSTB',
+                    'scenario': scenario,
+                    'region': 'France',
+                    'variable': 'Residential_dwelling',
+                    'unit': 'kWh_ef',
+                    'dpe': 'new',
+                    'ef_nrj': vector,
+                    'value': vector_value
+                })
+
+    # Create a DataFrame from the results
+    result_df = pd.DataFrame(results)
+
+    # Create a Pyam IamDataFrame from the results DataFrame
+    result_iamdf = pyam.IamDataFrame(result_df)
+
+    return result_iamdf
+
+
+def calculate_combined_operational_stock_iamdf(stock, ghge):
+    '''
+    Calculates operational GHGE of the stock,
+    by multiplying kWh of energy carriers by the corresponding GHGE factors.
+
+    Returns a unique pyam dataframe
+    '''
+
+    result_list = []
+
+    for stock_scenario in stock.scenario:
+        for stock_variable in stock.variable:
+            for stock_dpe in stock.dpe:
+                for ef_nrj in stock.ef_nrj:  # ['bois', 'charbon', 'elec', 'fioul', 'gaz', 'gpl', 'rcu']
+                    for ghge_scenario in ghge.scenario:
+
+                        # Make sure we're matching the energy carrier in both dataframes
+                        stock_df = stock.filter(scenario=stock_scenario, variable=stock_variable, dpe=stock_dpe, ef_nrj=ef_nrj).data
+                        ghge_df = ghge.filter(scenario=ghge_scenario, variable=ef_nrj).data
+
+                        # Check if there is data to multiply, otherwise skip to the next iteration
+                        if stock_df.empty or ghge_df.empty:
+                            continue
+
+                        # Calculate GHGE in MtCO2eq
+                        value_df = stock_df['value'] * ghge_df['value'] / 10e8
+
+                        # Construct the result dataframe
+                        result_df = stock_df.copy()
+                        result_df['value'] = value_df
+                        result_df['scenario'] = f'{stock_scenario}_{ghge_scenario}'
+                        result_df['variable'] = stock_variable
+                        result_df['unit'] = 'MtCO2eq'
+
+                        result_list.append(result_df)
+
+    # Convert the results to an IamDataFrame
+    results_df = pd.concat(result_list)
+    results_iamdf = pyam.IamDataFrame(results_df)
+
+    return results_iamdf
+
+
+def calculate_cumulated_combined_operational_stock_iamdf(stock, ghge):
+    '''
+     Calculates cumulated operational GHGE of the stock,
+     by multiplying kWh of energy carriers by the corresponding GHGE factors.
+
+     Returns a unique pyam dataframe
+     '''
+
+    result_list = []
+
+    for stock_scenario in stock.scenario:
+        for stock_variable in stock.variable:
+            for stock_dpe in stock.dpe:
+                for ef_nrj in stock.ef_nrj:  # ['bois', 'charbon', 'elec', 'fioul', 'gaz', 'gpl', 'rcu']
+                    for ghge_scenario in ghge.scenario:
+
+                        # Make sure we're matching the energy carrier in both dataframes
+                        stock_df = stock.filter(scenario=stock_scenario, variable=stock_variable, dpe=stock_dpe,
+                                                ef_nrj=ef_nrj).data
+                        ghge_df = ghge.filter(scenario=ghge_scenario, variable=ef_nrj).data
+
+                        # Check if there is data to multiply, otherwise skip to the next iteration
+                        if stock_df.empty or ghge_df.empty:
+                            continue
+
+                        # Calculate GHGE in MtCO2eq
+                        value_df = stock_df['value'].cumsum() * ghge_df['value'] / 10e8
+
+                        # Construct the result dataframe
+                        result_df = stock_df.copy()
+                        result_df['value'] = value_df
+                        result_df['scenario'] = f'{stock_scenario}_{ghge_scenario}'
+                        result_df['variable'] = stock_variable
+                        result_df['unit'] = 'MtCO2eq'
+
+                        result_list.append(result_df)
+
+    # Convert the results to an IamDataFrame
+    results_df = pd.concat(result_list)
+    results_iamdf = pyam.IamDataFrame(results_df)
+
+    return results_iamdf
+
+
+def calculate_cumulated_nrj_new_construction(stock):
+    '''
+       Calculates cumulated operational GHGE of the stock,
+       by multiplying kWh of energy carriers by the corresponding GHGE factors.
+
+       Returns a unique pyam dataframe
+       '''
+
+    result_list = []
+
+    for stock_scenario in stock.scenario:
+        for stock_variable in stock.variable:
+            for stock_dpe in stock.dpe:
+                for ef_nrj in stock.ef_nrj:  # ['bois', 'charbon', 'elec', 'fioul', 'gaz', 'gpl', 'rcu']
+                        # Make sure we're matching the energy carrier in both dataframes
+                        stock_df = stock.filter(scenario=stock_scenario, variable=stock_variable, dpe=stock_dpe,
+                                                ef_nrj=ef_nrj).data
+
+                        # Check if there is data to multiply, otherwise skip to the next iteration
+                        if stock_df.empty:
+                            continue
+
+                        # Calculate GHGE in MtCO2eq
+                        value_df = stock_df['value'].cumsum()
+
+                        # Construct the result dataframe
+                        result_df = stock_df.copy()
+                        result_df['value'] = value_df
+                        result_df['scenario'] = f'{stock_scenario}'
+                        result_df['variable'] = stock_variable
+                        result_df['unit'] = 'kWh'
+
+                        result_list.append(result_df)
+
+    # Convert the results to an IamDataFrame
+    results_df = pd.concat(result_list)
+    results_iamdf = pyam.IamDataFrame(results_df)
+
+    return results_iamdf
+
+
 
 # ========================================
 # Scripts
